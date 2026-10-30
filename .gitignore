@@ -1,0 +1,6 @@
+.env
+.events_state.json
+*.log
+*.png
+__pycache__/
+*.pyc
