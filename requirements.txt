@@ -1,0 +1,6 @@
+requests
+icalendar
+pillow
+font-hanken-grotesk
+tzdata
+inky[rpi]
