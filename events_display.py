@@ -135,7 +135,9 @@ def fetch_calendar_events():
                     "status": status,
                 })
         except Exception as e:
-            log.warning("Failed to fetch calendar: %s", e)
+            # Error messages include the request URL; redact the secret iCal path
+            err = re.sub(r"/calendar/ical/\S+", "/calendar/ical/<redacted>", str(e))
+            log.warning("Failed to fetch calendar %d: %s", cal_index + 1, err)
 
     if not any_success and GCAL_ICAL_URLS:
         raise RuntimeError("All calendar fetches failed")
