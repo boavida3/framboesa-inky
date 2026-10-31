@@ -1,10 +1,10 @@
-# CLAUDE.md
+# AGENT.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for working with code in this repository.
 
 ## Purpose
 
-E-ink display dashboard for a Raspberry Pi + Pimoroni Inky display. Fetches upcoming events from Google Calendar private iCal feeds, renders them onto a PIL image, and pushes to the hardware display. Falls back to saving a PNG preview when no hardware is detected.
+E-ink display dashboard for a Raspberry Pi + Pimoroni Inky display. Fetches upcoming events from private iCal feeds, renders them onto a PIL image, and pushes to the hardware display. Falls back to saving a PNG preview when no hardware is detected.
 
 ## Development Environment
 
@@ -44,7 +44,7 @@ A `events-display.service` systemd unit file exists but is **inactive** — use 
 
 Single-file script (`events_display.py`) with this data flow:
 
-1. **Fetch** — `fetch_calendar_events()` reads one or more Google Calendar private iCal URLs (set via `GCAL_ICAL_URL_*` in `.env`), filters to events within the next 30 days, converts datetimes to local timezone, and returns up to 8 events sorted by start time.
+1. **Fetch** — `fetch_calendar_events()` reads one or more private iCal URLs (set via `GCAL_ICAL_URL_*` in `.env`), filters to events within the next 30 days, converts datetimes to local timezone, and returns up to 8 events sorted by start time.
 2. **Render** — `render_events_image(events, width, height, colors)` draws a clean calendar list-view layout (black header with date, red meta rows, black event titles, thin separators) onto a PIL `"P"` mode (palette) image using a fixed 3-color palette: WHITE=0, BLACK=1, RED=2.
 3. **Display** — `update_display()` tries `from inky.auto import auto` to detect hardware. On success, pushes the image to the display. On failure, saves `events_preview.png`.
 4. **Daemon** — `run_daemon()` polls every 60 seconds, computes an MD5 hash of the event list, and only re-renders when events change. State is persisted to `.events_state.json` (stores both hash and event fingerprints). Pure event expirations (no new/changed events) skip the display refresh to avoid flicker.
@@ -66,14 +66,14 @@ Single-file script (`events_display.py`) with this data flow:
 ### Configuration (`.env`)
 
 ```
-GCAL_ICAL_URL_1=https://calendar.google.com/calendar/ical/.../basic.ics
+GCAL_ICAL_URL_1=https://example.com/private-.../calendar.ics
 GCAL_ICAL_URL_2=...               # optional second calendar
 GCAL_NAME_1=Me                    # optional label shown per calendar (GCAL_NAME_2, ...)
 DISPLAY_TZ=America/Los_Angeles    # timezone for all display times
 ```
 
 - `DISPLAY_TZ` is read into `LOCAL_TZ = zoneinfo.ZoneInfo(DISPLAY_TZ)` (Python 3.9+ stdlib). All event times and the footer "Updated:" timestamp use `LOCAL_TZ`. Required because the Pi runs UTC — without this, `.astimezone()` with no arg returns UTC.
-- Get iCal URLs from: Google Calendar → Settings → [Calendar] → Integrate calendar → "Secret address in iCal format".
+- Get iCal URLs from your calendar app's settings. Use the private address.
 
 ### Inky library (`inky/`)
 
@@ -81,7 +81,7 @@ Vendored Pimoroni Inky v2.3.0. `inky.auto.auto()` reads the Pi's I2C EEPROM to i
 
 ## Layout (in `render_events_image`)
 
-Apple/Google Calendar list-view style:
+Calendar list-view style:
 - **Header**: "My Calendar" in BLACK (title font, left-aligned), current date in BLACK (detail font, right-aligned), thin separator below. No background fill.
 - **Events**: meta row in RED (`Tue Mar 3  ·  12:00 PM  ·  Venue`, detail font) above event title in BLACK (event font). Gap between events.
 - **Footer**: thin separator, right-aligned "Updated: Feb 25, 9:10 PM" in BLACK (detail font).
