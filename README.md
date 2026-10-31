@@ -28,4 +28,4 @@ Run it from cron; it only refreshes the display when events change:
 ```
 A systemd unit (`events-display.service`) is included as an alternative to cron; use one, not both.
 
-See `CLAUDE.md` for architecture details. Built on [Pimoroni's inky library](https://github.com/pimoroni/inky) (MIT).
+See `AGENT.md` for architecture details. Built on [Pimoroni's inky library](https://github.com/pimoroni/inky) (MIT).
