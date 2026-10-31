@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Inky Display: Google Calendar Events
+"""Inky Display: Calendar Events
 
-Fetches upcoming events from Google Calendar private iCal feeds
+Fetches upcoming events from private iCal feeds
 and displays them on an Inky e-ink display.
 
 Run as a daemon (default): python3 events_display.py
@@ -83,7 +83,7 @@ def sanitize_text(text):
 
 
 def fetch_calendar_events():
-    """Fetch upcoming events from one or more Google Calendar private iCal feeds.
+    """Fetch upcoming events from one or more private iCal feeds.
 
     Returns a list of event dicts, or raises RuntimeError if any fetch failed, so a
     temporary outage on one calendar can't look like its events were deleted.
