@@ -10,7 +10,7 @@ Run as a daemon (default): python3 events_display.py
 Run once and exit:         python3 events_display.py --once
 
 Dependencies:
-    pip install requests icalendar pillow font-hanken-grotesk
+    pip install requests recurring-ical-events icalendar pillow font-hanken-grotesk
 """
 
 import argparse
@@ -21,6 +21,7 @@ import logging
 import time
 import zoneinfo
 
+import recurring_ical_events
 import requests
 from icalendar import Calendar
 from PIL import Image, ImageDraw, ImageFont
@@ -84,25 +85,23 @@ def sanitize_text(text):
 def fetch_calendar_events():
     """Fetch upcoming events from one or more Google Calendar private iCal feeds.
 
-    Returns a list of event dicts, or raises RuntimeError if all fetches failed.
+    Returns a list of event dicts, or raises RuntimeError if any fetch failed, so a
+    temporary outage on one calendar can't look like its events were deleted.
     """
     now_local = datetime.datetime.now(LOCAL_TZ) if LOCAL_TZ else datetime.datetime.now().astimezone()
     today = now_local.date()
     cutoff = today + datetime.timedelta(days=90)
     events = []
-    any_success = False
+    any_failed = False
 
     for cal_index, url in enumerate(GCAL_ICAL_URLS):
         try:
             resp = requests.get(url, timeout=10)
             resp.raise_for_status()
             cal = Calendar.from_ical(resp.content)
-            any_success = True
 
-            for component in cal.walk():
-                if component.name != "VEVENT":
-                    continue
-
+            # Expands repeating events into their individual occurrences
+            for component in recurring_ical_events.of(cal).between(today, cutoff + datetime.timedelta(days=1)):
                 start = component.get("DTSTART").dt
                 if isinstance(start, datetime.datetime):
                     if start.tzinfo is not None:
@@ -138,16 +137,30 @@ def fetch_calendar_events():
             # Error messages include the request URL; redact the secret iCal path
             err = re.sub(r"/calendar/ical/\S+", "/calendar/ical/<redacted>", str(e))
             log.warning("Failed to fetch calendar %d: %s", cal_index + 1, err)
+            any_failed = True
 
-    if not any_success and GCAL_ICAL_URLS:
-        raise RuntimeError("All calendar fetches failed")
+    if any_failed:
+        raise RuntimeError("Calendar fetch failed")
 
     events.sort(key=lambda e: e["sort_key"])
-    return events
+    return dedupe_events(events)
+
+
+def dedupe_events(events):
+    """Drop events that appear on more than one calendar, keeping the first calendar's copy."""
+    seen = set()
+    unique = []
+    for ev in sorted(events, key=lambda e: e["cal_index"]):
+        key = (ev["sort_key"], ev["name"], ev["venue"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(ev)
+    unique.sort(key=lambda e: e["sort_key"])
+    return unique
 
 
 def fetch_all_events():
-    """Returns event list on success, or None if all fetches failed."""
+    """Returns event list on success, or None if any fetch failed."""
     try:
         return fetch_calendar_events()
     except Exception as e:
@@ -159,10 +172,25 @@ def fetch_all_events():
 # Change detection state
 # ---------------------------------------------------------------------------
 
+# Inky Impression 7.3" resolution, used to work out which events fit on screen
+VISIBLE_WIDTH = 800
+VISIBLE_HEIGHT = 480
+
+
 def compute_events_hash(events):
     """Return an MD5 hex digest of the sorted event list."""
     key = sorted([(e["name"], e["date"], e["venue"], e.get("status", "CONFIRMED")) for e in events])
     return hashlib.md5(str(key).encode()).hexdigest()
+
+
+def compute_visible_hash(events):
+    """Return a digest of what the screen would show, ignoring the current date and time.
+
+    Events too far down the list to fit on screen don't affect it.
+    """
+    colors = {"WHITE": 0, "BLACK": 1, "RED": 2, "BLUE": 3, "GREEN": 4, "YELLOW": 5}
+    img = render_events_image(events, VISIBLE_WIDTH, VISIBLE_HEIGHT, colors, now=datetime.datetime(2000, 1, 1))
+    return hashlib.md5(img.tobytes()).hexdigest()
 
 
 def _has_meaningful_change(prev_fingerprints, events):
@@ -191,21 +219,22 @@ def _has_meaningful_change(prev_fingerprints, events):
 
 
 def load_state():
-    """Return (hash_str, prev_fingerprints) from the state file, or (None, []) if unavailable."""
+    """Return (hash_str, visible_hash, prev_fingerprints) from the state file, or (None, None, []) if unavailable."""
     try:
         with open(_STATE_FILE) as f:
             data = json.load(f)
-        return data.get("hash"), data.get("events", [])
+        return data.get("hash"), data.get("visible_hash"), data.get("events", [])
     except Exception:
-        return None, []
+        return None, None, []
 
 
-def save_state(hash_str, events):
+def save_state(hash_str, visible_hash, events):
     """Persist the current hash and event fingerprints to the state file."""
     fingerprints = [{"sort_key": e["sort_key"], "name": e["name"], "date": e["date"], "venue": e.get("venue", ""), "status": e.get("status", "CONFIRMED"), "cal_index": e.get("cal_index", 0)} for e in events]
     with open(_STATE_FILE, "w") as f:
         json.dump({
             "hash": hash_str,
+            "visible_hash": visible_hash,
             "updated_at": datetime.datetime.now().isoformat(),
             "events": fingerprints,
         }, f)
@@ -271,7 +300,7 @@ def truncate(text, font, max_width):
     return text.rstrip() + "..."
 
 
-def render_events_image(events, width, height, colors):
+def render_events_image(events, width, height, colors, now=None):
     """Render event list onto a PIL Image sized for the Inky display.
 
     Args:
@@ -279,6 +308,7 @@ def render_events_image(events, width, height, colors):
         width: display width in pixels
         height: display height in pixels
         colors: dict with keys WHITE, BLACK, RED (int palette indices)
+        now: datetime for the header and footer; defaults to the current time
 
     Returns:
         PIL.Image in palette mode
@@ -335,7 +365,7 @@ def render_events_image(events, width, height, colors):
     content_width = width - (padding * 2) - bar_indent
 
     # --- Header (no background rectangle) ---
-    now = datetime.datetime.now(LOCAL_TZ) if LOCAL_TZ else datetime.datetime.now().astimezone()
+    now = now or (datetime.datetime.now(LOCAL_TZ) if LOCAL_TZ else datetime.datetime.now().astimezone())
     header_text = now.strftime("%B %Y")
     date_header = now.strftime("%b %-d")
 
@@ -477,6 +507,24 @@ def update_display(events):
 # Daemon loop
 # ---------------------------------------------------------------------------
 
+def refresh_if_changed(events):
+    """Redraw the display only if the events on screen changed, and persist the new state."""
+    new_hash = compute_events_hash(events)
+    old_hash, old_visible_hash, prev_fingerprints = load_state()
+    if new_hash == old_hash:
+        log.debug("No change, skipping display update.")
+        return
+    new_visible_hash = compute_visible_hash(events)
+    if new_visible_hash == old_visible_hash:
+        log.info("Change isn't visible on screen, skipping display refresh.")
+    elif _has_meaningful_change(prev_fingerprints, events):
+        log.info("Events changed, updating display.")
+        update_display(events)
+    else:
+        log.info("Only event expirations, skipping display refresh.")
+    save_state(new_hash, new_visible_hash, events)
+
+
 def run_daemon(interval=60):
     """Poll for calendar changes every `interval` seconds and refresh display when changed."""
     log.info("Starting daemon (poll interval: %ds).", interval)
@@ -487,23 +535,7 @@ def run_daemon(interval=60):
                 if events is None:
                     log.warning("Calendar fetch failed, keeping last display.")
                 else:
-                    new_hash = compute_events_hash(events)
-                    old_hash, prev_fingerprints = load_state()
-                    if new_hash != old_hash:
-                        if _has_meaningful_change(prev_fingerprints, events):
-                            log.info("Events changed, updating display.")
-                            if events:
-                                log.info("Displaying %d events:", len(events))
-                                for ev in events:
-                                    log.info("  - %s | %s | %s", ev["name"], ev["date"], ev["venue"])
-                            else:
-                                log.info("No upcoming events.")
-                            update_display(events)
-                        else:
-                            log.info("Only event expirations, skipping display refresh.")
-                        save_state(new_hash, events)
-                    else:
-                        log.debug("No change, skipping.")
+                    refresh_if_changed(events)
             except Exception as e:
                 log.warning("Daemon iteration failed: %s", e)
             time.sleep(interval)
@@ -536,17 +568,7 @@ def main():
         else:
             log.info("No upcoming events.")
         if events is not None:
-            new_hash = compute_events_hash(events)
-            old_hash, prev_fingerprints = load_state()
-            if new_hash != old_hash:
-                if _has_meaningful_change(prev_fingerprints, events):
-                    log.info("Events changed, updating display.")
-                    update_display(events)
-                else:
-                    log.info("Only event expirations, skipping display refresh.")
-                save_state(new_hash, events)
-            else:
-                log.debug("No change, skipping display update.")
+            refresh_if_changed(events)
     else:
         run_daemon(interval=60)
 
