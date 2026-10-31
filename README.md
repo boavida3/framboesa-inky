@@ -1,6 +1,6 @@
 # events-display
 
-Shows upcoming Google Calendar events on a Pimoroni Inky Impression 7.3" (Spectra 6, 800x480) attached to a Raspberry Pi. Without display hardware it saves `events_preview.png` instead.
+Shows upcoming calendar events on a Pimoroni Inky Impression 7.3" (Spectra 6, 800x480) attached to a Raspberry Pi. Without display hardware it saves `events_preview.png` instead.
 
 ## Setup (on the Pi)
 ```bash
@@ -10,14 +10,14 @@ python3 events_display.py --once
 ```
 
 ### Add your calendars
-For each calendar, open Google Calendar on a computer and go to **Settings → [your calendar] → Integrate calendar**. Copy **Secret address in iCal format**. Don't use the public address or the embed link.
+For each calendar, find its private iCal (`.ics`) address in your calendar app's settings. Don't use a public address or an embed link.
 
 Add it to `.env`, numbering each calendar and adding a label to show on the display:
 ```
 DISPLAY_TZ=America/Los_Angeles
-GCAL_ICAL_URL_1=https://calendar.google.com/calendar/ical/.../private-.../basic.ics
+GCAL_ICAL_URL_1=https://example.com/private-.../calendar.ics
 GCAL_NAME_1=Me
-GCAL_ICAL_URL_2=https://calendar.google.com/calendar/ical/.../private-.../basic.ics
+GCAL_ICAL_URL_2=https://example.com/private-.../calendar.ics
 GCAL_NAME_2=Partner
 ```
 Calendars 1, 2 and 3 are shown in blue, red and green; further calendars repeat those colors. Treat each secret address like a password: anyone who has it can read that calendar. Never commit `.env`.
