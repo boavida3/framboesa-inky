@@ -1,5 +1,6 @@
 .env
 .events_state.json
+.fetch_failure.json
 *.log
 *.png
 __pycache__/

@@ -36,6 +36,10 @@ import unicodedata
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _STATE_FILE = os.path.join(_SCRIPT_DIR, ".events_state.json")
+_FAILURE_FILE = os.path.join(_SCRIPT_DIR, ".fetch_failure.json")
+# A short outage on one calendar mustn't look like its events were deleted, so the
+# screen stays as it is for this long before showing a warning and whatever still works.
+FAILURE_GRACE = datetime.timedelta(hours=1)
 
 
 def _load_env():
@@ -107,14 +111,13 @@ def _has_finished(component, start_date, now_local):
 def fetch_calendar_events():
     """Fetch upcoming events from one or more private iCal feeds.
 
-    Returns a list of event dicts, or raises RuntimeError if any fetch failed, so a
-    temporary outage on one calendar can't look like its events were deleted.
+    Returns (events, failed_count). events is None if every calendar failed.
     """
     now_local = datetime.datetime.now(LOCAL_TZ) if LOCAL_TZ else datetime.datetime.now().astimezone()
     today = now_local.date()
     cutoff = today + datetime.timedelta(days=90)
     events = []
-    any_failed = False
+    failed_count = 0
 
     for cal_index, url in enumerate(GCAL_ICAL_URLS):
         try:
@@ -159,13 +162,13 @@ def fetch_calendar_events():
             # Error messages include the request URL; redact the secret iCal path
             err = re.sub(r"/calendar/ical/\S+", "/calendar/ical/<redacted>", str(e))
             log.warning("Failed to fetch calendar %d: %s", cal_index + 1, err)
-            any_failed = True
+            failed_count += 1
 
-    if any_failed:
-        raise RuntimeError("Calendar fetch failed")
+    if GCAL_ICAL_URLS and failed_count == len(GCAL_ICAL_URLS):
+        return None, failed_count
 
     events.sort(key=lambda e: e["sort_key"])
-    return dedupe_events(events)
+    return dedupe_events(events), failed_count
 
 
 def dedupe_events(events):
@@ -179,15 +182,6 @@ def dedupe_events(events):
             unique.append(ev)
     unique.sort(key=lambda e: e["sort_key"])
     return unique
-
-
-def fetch_all_events():
-    """Returns event list on success, or None if any fetch failed."""
-    try:
-        return fetch_calendar_events()
-    except Exception as e:
-        log.warning("Calendar fetch failed: %s", e)
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -226,9 +220,27 @@ def compute_visible_hash(events):
     return hashlib.md5(img.tobytes()).hexdigest()
 
 
-def _layout_key():
-    """Identify what needs a redraw when it changes: the rotation, and the date shown on screen."""
-    return f"{DISPLAY_ROTATION}|{_today().isoformat()}"
+def _layout_key(warning=None):
+    """Identify what needs a redraw when it changes: rotation, the date on screen and any warning."""
+    return f"{DISPLAY_ROTATION}|{_today().isoformat()}|{warning or ''}"
+
+
+def _failing_since():
+    """Return when calendar fetches started failing, recording now if this is the first failure."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    try:
+        with open(_FAILURE_FILE) as f:
+            return datetime.datetime.fromisoformat(json.load(f)["since"])
+    except Exception:
+        with open(_FAILURE_FILE, "w") as f:
+            json.dump({"since": now.isoformat()}, f)
+        return now
+
+
+def _clear_failure():
+    """Forget any recorded failure after all calendars fetch successfully."""
+    if os.path.exists(_FAILURE_FILE):
+        os.remove(_FAILURE_FILE)
 
 
 def load_state():
@@ -241,14 +253,14 @@ def load_state():
         return None, None, [], None
 
 
-def save_state(hash_str, visible_hash, events):
+def save_state(hash_str, visible_hash, events, layout):
     """Persist the current hash and event fingerprints to the state file."""
     fingerprints = [{"sort_key": e["sort_key"], "name": e["name"], "date": e["date"], "venue": e.get("venue", ""), "status": e.get("status", "CONFIRMED"), "cal_index": e.get("cal_index", 0)} for e in events]
     with open(_STATE_FILE, "w") as f:
         json.dump({
             "hash": hash_str,
             "visible_hash": visible_hash,
-            "layout": _layout_key(),
+            "layout": layout,
             "updated_at": datetime.datetime.now().isoformat(),
             "events": fingerprints,
         }, f)
@@ -369,7 +381,7 @@ def truncate(text, font, max_width):
     return text.rstrip() + "..."
 
 
-def render_events_image(events, width, height, colors, now=None):
+def render_events_image(events, width, height, colors, now=None, warning=None):
     """Render event list onto a PIL Image sized for the Inky display.
 
     Args:
@@ -377,7 +389,8 @@ def render_events_image(events, width, height, colors, now=None):
         width: display width in pixels
         height: display height in pixels
         colors: dict with keys WHITE, BLACK, RED (int palette indices)
-        now: datetime for the header and footer; defaults to the current time
+        now: datetime for the header and day labels; defaults to the current time
+        warning: text shown in red in place of the header date, if updates are failing
 
     Returns:
         PIL.Image in palette mode
@@ -442,9 +455,9 @@ def render_events_image(events, width, height, colors, now=None):
     draw.text((padding, padding), header_text, fill=BLACK, font=title_font, anchor="lt")
 
     # Right: current date in detail font, vertically centered with the title
-    date_w, date_h = getsize(detail_font, date_header)
+    date_w, date_h = getsize(detail_font, warning or date_header)
     date_y = padding + (title_h - date_h) // 2
-    draw.text((width - padding - date_w, date_y), date_header, fill=BLACK, font=detail_font, anchor="lt")
+    draw.text((width - padding - date_w, date_y), warning or date_header, fill=RED if warning else BLACK, font=detail_font, anchor="lt")
 
     # Thin separator below header
     draw.line((padding, header_height, width - padding, header_height), fill=BLACK, width=1)
@@ -516,10 +529,10 @@ def _init_display():
         return None, {"WHITE": 0, "BLACK": 1, "RED": 2, "BLUE": 3, "GREEN": 4, "YELLOW": 5}, 400, 300
 
 
-def update_display(events):
+def update_display(events, warning=None):
     """Render events and push to hardware (or save preview PNG if no hardware)."""
     inky_display, colors, w, h = _init_display()
-    img = render_events_image(events, *_layout_size(w, h), colors)
+    img = render_events_image(events, *_layout_size(w, h), colors, warning=warning)
     if DISPLAY_ROTATION:
         img = img.rotate(-DISPLAY_ROTATION, expand=True)
 
@@ -546,24 +559,50 @@ def update_display(events):
 # Daemon loop
 # ---------------------------------------------------------------------------
 
-def refresh_if_changed(events):
-    """Redraw the display only if the events on screen changed, and persist the new state."""
+def refresh_if_changed(events, warning=None):
+    """Redraw the display only if what's on screen changed, and persist the new state."""
     new_hash = compute_events_hash(events)
     old_hash, old_visible_hash, _, old_layout = load_state()
-    layout_changed = _layout_key() != old_layout
+    layout = _layout_key(warning)
+    layout_changed = layout != old_layout
     if new_hash == old_hash and not layout_changed:
         log.debug("No change, skipping display update.")
         return
     new_visible_hash = compute_visible_hash(events)
     if layout_changed:
-        log.info("Day or rotation changed, updating display.")
-        update_display(events)
+        log.info("Day, rotation or warning changed, updating display.")
+        update_display(events, warning)
     elif new_visible_hash == old_visible_hash:
         log.info("Change isn't visible on screen, skipping display refresh.")
     else:
         log.info("Events changed, updating display.")
-        update_display(events)
-    save_state(new_hash, new_visible_hash, events)
+        update_display(events, warning)
+    save_state(new_hash, new_visible_hash, events, layout)
+
+
+def poll():
+    """Fetch calendars once and update the display, tolerating failures.
+
+    Within FAILURE_GRACE of a failure, the screen stays as it is. After that, it shows
+    a warning with the calendars that still work, or the last known events if none do.
+    """
+    events, failed_count = fetch_calendar_events()
+    if not failed_count:
+        _clear_failure()
+        log.info("Displaying %d events.", len(events))
+        refresh_if_changed(events)
+        return
+
+    since = _failing_since()
+    if datetime.datetime.now(datetime.timezone.utc) - since < FAILURE_GRACE:
+        log.warning("%d calendar(s) failed, keeping last display.", failed_count)
+        return
+
+    if events is None:
+        events = load_state()[2]
+    log.warning("%d calendar(s) failing since %s, showing a warning.", failed_count, since.isoformat())
+    last_success = since.astimezone(LOCAL_TZ) if LOCAL_TZ else since.astimezone()
+    refresh_if_changed(events, last_success.strftime("Not updated since %b %-d %-I:%M %p"))
 
 
 def run_daemon(interval=60):
@@ -572,11 +611,7 @@ def run_daemon(interval=60):
     try:
         while True:
             try:
-                events = fetch_all_events()
-                if events is None:
-                    log.warning("Calendar fetch failed, keeping last display.")
-                else:
-                    refresh_if_changed(events)
+                poll()
             except Exception as e:
                 log.warning("Daemon iteration failed: %s", e)
             time.sleep(interval)
@@ -598,18 +633,7 @@ def main():
     args = parser.parse_args()
 
     if args.once:
-        log.info("Fetching calendar events...")
-        events = fetch_all_events()
-        if events is None:
-            log.warning("Calendar fetch failed.")
-        elif events:
-            log.info("Displaying %d events:", len(events))
-            for ev in events:
-                log.debug("  - %s | %s | %s", ev["name"], ev["date"], ev["venue"])
-        else:
-            log.info("No upcoming events.")
-        if events is not None:
-            refresh_if_changed(events)
+        poll()
     else:
         run_daemon(interval=60)
 
