@@ -10,7 +10,7 @@ Run as a daemon (default): python3 events_display.py
 Run once and exit:         python3 events_display.py --once
 
 Dependencies:
-    pip install requests recurring-ical-events icalendar pillow font-hanken-grotesk
+    pip install requests recurring-ical-events icalendar pillow
 """
 
 import argparse
@@ -195,14 +195,19 @@ def _layout_size(width, height):
     return (height, width) if DISPLAY_ROTATION in (90, 270) else (width, height)
 
 
+def _today():
+    """Return today's date in the display's timezone."""
+    return (datetime.datetime.now(LOCAL_TZ) if LOCAL_TZ else datetime.datetime.now().astimezone()).date()
+
+
 def compute_visible_hash(events):
-    """Return a digest of what the screen would show, ignoring the current date and time.
+    """Return a digest of what the screen would show today.
 
     Events too far down the list to fit on screen don't affect it.
     """
     colors = {"WHITE": 0, "BLACK": 1, "RED": 2, "BLUE": 3, "GREEN": 4, "YELLOW": 5}
     width, height = _layout_size(VISIBLE_WIDTH, VISIBLE_HEIGHT)
-    img = render_events_image(events, width, height, colors, now=datetime.datetime(2000, 1, 1))
+    img = render_events_image(events, width, height, colors, now=datetime.datetime.combine(_today(), datetime.time()))
     return hashlib.md5(img.tobytes()).hexdigest()
 
 
@@ -231,14 +236,19 @@ def _has_meaningful_change(prev_fingerprints, events):
     return False  # only past events expired
 
 
+def _layout_key():
+    """Identify settings that need a redraw when they change: rotation and the day labels."""
+    return f"{DISPLAY_ROTATION}|{_today().isoformat()}"
+
+
 def load_state():
-    """Return (hash_str, visible_hash, prev_fingerprints, rotation) from the state file, or (None, None, [], 0) if unavailable."""
+    """Return (hash_str, visible_hash, prev_fingerprints, layout) from the state file, or (None, None, [], None) if unavailable."""
     try:
         with open(_STATE_FILE) as f:
             data = json.load(f)
-        return data.get("hash"), data.get("visible_hash"), data.get("events", []), data.get("rotation", 0)
+        return data.get("hash"), data.get("visible_hash"), data.get("events", []), data.get("layout")
     except Exception:
-        return None, None, [], 0
+        return None, None, [], None
 
 
 def save_state(hash_str, visible_hash, events):
@@ -248,7 +258,7 @@ def save_state(hash_str, visible_hash, events):
         json.dump({
             "hash": hash_str,
             "visible_hash": visible_hash,
-            "rotation": DISPLAY_ROTATION,
+            "layout": _layout_key(),
             "updated_at": datetime.datetime.now().isoformat(),
             "events": fingerprints,
         }, f)
@@ -258,6 +268,7 @@ def save_state(hash_str, visible_hash, events):
 # Display rendering
 # ---------------------------------------------------------------------------
 
+FONT_PATH = os.path.join(_SCRIPT_DIR, "fonts", "AtkinsonHyperlegible-Bold.ttf")
 FALLBACK_FONT = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 
 
@@ -314,157 +325,131 @@ def truncate(text, font, max_width):
     return text.rstrip() + "..."
 
 
+def _load_font(size):
+    """Load the display font, with a fallback for scripts it doesn't cover."""
+    font = ImageFont.truetype(FONT_PATH, size)
+    try:
+        return FallbackFont(font, ImageFont.truetype(FALLBACK_FONT, size))
+    except OSError:
+        return font
+
+
+def _day_label(day, today):
+    """Return a plain-language heading for a date."""
+    if day == today:
+        return day.strftime("Today, %a %b %-d")
+    if day == today + datetime.timedelta(days=1):
+        return "Tomorrow"
+    return day.strftime("%a %b %-d")
+
+
+def _short_time(date_str):
+    """Turn 'Tue Mar 3, 12:00 PM' into '12:00p'; all-day events have no time."""
+    parts = date_str.split(", ", 1)
+    return parts[1].replace(" AM", "a").replace(" PM", "p") if len(parts) > 1 else ""
+
+
+def _place_rows(events, today, rows, cols):
+    """Lay events out on a grid of slots, column by column.
+
+    Returns (placements, hidden_count). Each placement is (slot, kind, value), where
+    kind is "day" or "event". A heading always stays in the same column as its first
+    event, and is repeated when a day continues into the next column.
+    """
+    slots = rows * cols
+    placements = []
+    pos = 0
+    current_day = None
+    for i, ev in enumerate(events):
+        day = datetime.date.fromisoformat(ev["sort_key"][:10])
+        needs_heading = day != current_day or pos % rows == 0
+        if needs_heading and pos % rows == rows - 1:
+            pos += 1
+        needed = 2 if needs_heading else 1
+        more_slot = 1 if i < len(events) - 1 else 0
+        if pos + needed + more_slot > slots:
+            return placements, len(events) - i
+        if needs_heading:
+            placements.append((pos, "day", _day_label(day, today)))
+            pos += 1
+            current_day = day
+        placements.append((pos, "event", ev))
+        pos += 1
+    return placements, 0
+
+
 def render_events_image(events, width, height, colors, now=None):
-    """Render event list onto a PIL Image sized for the Inky display.
+    """Render events as a day-grouped agenda on a PIL Image sized for the Inky display.
+
+    Every row sits on one shared grid, so both columns line up across the screen.
 
     Args:
-        events: list of event dicts with 'name', 'date', 'venue' keys
+        events: list of event dicts with 'name', 'date', 'sort_key', 'cal_index' keys
         width: display width in pixels
         height: display height in pixels
         colors: dict with keys WHITE, BLACK, RED (int palette indices)
-        now: datetime for the header and footer; defaults to the current time
+        now: datetime used to label days; defaults to the current time
 
     Returns:
         PIL.Image in palette mode
     """
     WHITE = colors["WHITE"]
     BLACK = colors["BLACK"]
-    RED = colors["RED"]
-    BLUE = colors.get("BLUE", BLACK)
-    GREEN = colors.get("GREEN", BLACK)
-
-    # Calendar index → sidebar color (names come from GCAL_NAME_* in .env)
-    CAL_COLORS = [BLUE, RED, GREEN]
-    CAL_NAMES = GCAL_NAMES or ["Calendar"]
+    # Calendar index -> sidebar color
+    cal_colors = [colors.get("BLUE", BLACK), colors["RED"], colors.get("GREEN", BLACK)]
 
     img = Image.new("P", (width, height), WHITE)
     draw = ImageDraw.Draw(img)
 
-    # Scale fonts and spacing based on display width
     scale = max(width, height) / 800.0
-    title_size = max(14, int(26 * scale))
-    event_size = max(10, int(32 * scale))
-    detail_size = max(9, int(24 * scale))
+    title_font = _load_font(int(31 * scale))
+    day_font = _load_font(int(25 * scale))
 
-    # Try loading nice fonts, fall back to default.
-    # Each font is wrapped with FallbackFont for non-Latin character support.
-    try:
-        from font_hanken_grotesk import HankenGroteskBold, HankenGroteskMedium
-        title_font = FallbackFont(ImageFont.truetype(HankenGroteskBold, title_size),
-                                  ImageFont.truetype(FALLBACK_FONT, title_size))
-        event_font = FallbackFont(ImageFont.truetype(HankenGroteskMedium, event_size),
-                                  ImageFont.truetype(FALLBACK_FONT, event_size))
-        detail_font = FallbackFont(ImageFont.truetype(HankenGroteskMedium, detail_size),
-                                   ImageFont.truetype(FALLBACK_FONT, detail_size))
-    except (ImportError, OSError):
-        try:
-            title_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", title_size)
-            event_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", event_size)
-            detail_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", detail_size)
-            # Wrap with fallback if available
-            try:
-                title_font = FallbackFont(title_font, ImageFont.truetype(FALLBACK_FONT, title_size))
-                event_font = FallbackFont(event_font, ImageFont.truetype(FALLBACK_FONT, event_size))
-                detail_font = FallbackFont(detail_font, ImageFont.truetype(FALLBACK_FONT, detail_size))
-            except OSError:
-                pass
-        except OSError:
-            title_font = ImageFont.load_default()
-            event_font = title_font
-            detail_font = title_font
+    margin = int(12 * scale)
+    gutter = int(20 * scale)
+    row_height = int(38 * scale)
+    baseline = int(29 * scale)
+    bar_width = int(7 * scale)
+    text_inset = bar_width + int(7 * scale)
+    time_gap = int(10 * scale)
 
-    padding = max(6, int(14 * scale))
-    bar_width = max(3, int(8 * scale))
-    bar_indent = bar_width + max(4, int(6 * scale))
-    content_width = width - (padding * 2) - bar_indent
+    cols = 2 if width >= height else 1
+    rows = (height - margin * 2) // row_height
+    col_width = (width - margin * 2 - gutter * (cols - 1)) // cols
+    top = (height - rows * row_height) // 2
+    time_width = getsize(title_font, "12:00p")[0]
 
-    # --- Header (no background rectangle) ---
     now = now or (datetime.datetime.now(LOCAL_TZ) if LOCAL_TZ else datetime.datetime.now().astimezone())
-    header_text = now.strftime("%B %Y")
-    date_header = now.strftime("%b %-d")
 
-    title_h = getsize(title_font, header_text)[1]
-    header_height = title_h + padding * 2
-
-    # Left: calendar name in black
-    draw.text((padding, padding), header_text, fill=BLACK, font=title_font, anchor="lt")
-
-    # Right: current date in detail font, vertically centered with the title
-    date_w, date_h = getsize(detail_font, date_header)
-    date_y = padding + (title_h - date_h) // 2
-    draw.text((width - padding - date_w, date_y), date_header, fill=BLACK, font=detail_font, anchor="lt")
-
-    # Thin separator below header
-    draw.line((padding, header_height, width - padding, header_height), fill=BLACK, width=1)
-
-    # --- Event list ---
-    y = header_height + int(6 * scale)
-    event_gap = max(6, int(10 * scale))
-    meta_gap = max(1, int(2 * scale))
-
-    # Reserve space for footer: tiny timestamp in bottom-right corner
-    footer_size = max(7, int(14 * scale))
-    try:
-        from font_hanken_grotesk import HankenGroteskMedium
-        footer_font = ImageFont.truetype(HankenGroteskMedium, footer_size)
-    except (ImportError, OSError):
-        try:
-            footer_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", footer_size)
-        except OSError:
-            footer_font = ImageFont.load_default()
-    footer_margin = max(4, int(6 * scale))
-    footer_reserve = getsize(footer_font, "A")[1] + footer_margin
-
-    text_x = padding + bar_indent
+    def slot_origin(slot):
+        col, row = slot // rows, slot % rows
+        return margin + col * (col_width + gutter), top + row * row_height
 
     if not events:
-        msg = "No upcoming events."
-        draw.text((text_x, y + int(20 * scale)), msg, fill=BLACK, font=event_font, anchor="lt")
+        x, y = slot_origin(0)
+        draw.text((x, y + baseline), "No upcoming events.", fill=BLACK, font=title_font, anchor="ls")
         return img
 
-    for i, ev in enumerate(events):
-        # Check if there's room for at least the meta + name rows
-        needed = getsize(detail_font, "A")[1] + meta_gap + getsize(event_font, "A")[1]
-        if y + needed > height - footer_reserve:
-            remaining = len(events) - i
-            draw.text((text_x, y), f"+ {remaining} more", fill=RED, font=detail_font, anchor="lt")
-            break
+    placements, hidden = _place_rows(events, now.date(), rows, cols)
 
-        y_start = y
+    for slot, kind, value in placements:
+        x, y = slot_origin(slot)
+        if kind == "day":
+            draw.text((x, y + baseline), value, fill=BLACK, font=day_font, anchor="ls")
+            draw.line((x, y + row_height - 3, x + col_width, y + row_height - 3), fill=BLACK, width=2)
+            continue
+        draw.rectangle((x, y + 4, x + bar_width - 1, y + row_height - 4), fill=cal_colors[value.get("cal_index", 0) % len(cal_colors)])
+        time_text = _short_time(value["date"])
+        title_width = col_width - text_inset
+        if time_text:
+            title_width -= time_width + time_gap
+            draw.text((x + col_width, y + baseline), time_text, fill=BLACK, font=title_font, anchor="rs")
+        name = truncate(value["name"], title_font, title_width)
+        draw.text((x + text_inset, y + baseline), name, fill=BLACK, font=title_font, anchor="ls")
 
-        # Title row
-        name = truncate(ev["name"], event_font, content_width)
-        draw.text((text_x, y), name, fill=BLACK, font=event_font, anchor="lt")
-        y += getsize(event_font, name)[1] + meta_gap
-
-        # Detail row: "Calendar name  ·  Tue Mar 3  ·  12:00 PM [·  venue]"
-        cal_index = ev.get("cal_index", 0)
-        cal_color = CAL_COLORS[cal_index % len(CAL_COLORS)]
-        cal_name = CAL_NAMES[cal_index % len(CAL_NAMES)]
-        parts = ev["date"].split(", ", 1)
-        date_part = parts[0]
-        time_part = parts[1] if len(parts) > 1 else "All Day"
-        meta = f"{cal_name}  \u00b7  {date_part}  \u00b7  {time_part}"
-        if ev.get("venue"):
-            meta += f"  \u00b7  {ev['venue']}"
-        meta = truncate(meta, detail_font, content_width)
-        draw.text((text_x, y), meta, fill=cal_color, font=detail_font, anchor="lt")
-        y += getsize(detail_font, meta)[1]
-
-        # Colored sidebar bar
-        draw.rectangle((padding, y_start, padding + bar_width - 1, y - 1), fill=cal_color)
-
-        y += event_gap
-
-        # Separator line between events
-        if i < len(events) - 1:
-            draw.line((padding, y, width - padding, y), fill=BLACK, width=1)
-            y += event_gap
-
-    # --- Footer: tiny timestamp, bottom-right corner ---
-    footer_text = now.strftime("%-m/%-d %-I:%M %p")
-    footer_w, footer_h = getsize(footer_font, footer_text)
-    draw.text((width - padding - footer_w, height - footer_h - footer_margin), footer_text, fill=BLACK, font=footer_font, anchor="lt")
+    if hidden:
+        x, y = slot_origin(rows * cols - 1)
+        draw.text((x + col_width, y + baseline), f"+ {hidden} more", fill=BLACK, font=day_font, anchor="rs")
 
     return img
 
@@ -526,14 +511,14 @@ def update_display(events):
 def refresh_if_changed(events):
     """Redraw the display only if the events on screen changed, and persist the new state."""
     new_hash = compute_events_hash(events)
-    old_hash, old_visible_hash, prev_fingerprints, old_rotation = load_state()
-    rotation_changed = DISPLAY_ROTATION != old_rotation
-    if new_hash == old_hash and not rotation_changed:
+    old_hash, old_visible_hash, prev_fingerprints, old_layout = load_state()
+    layout_changed = _layout_key() != old_layout
+    if new_hash == old_hash and not layout_changed:
         log.debug("No change, skipping display update.")
         return
     new_visible_hash = compute_visible_hash(events)
-    if rotation_changed:
-        log.info("Rotation changed, updating display.")
+    if layout_changed:
+        log.info("Day or rotation changed, updating display.")
         update_display(events)
     elif new_visible_hash == old_visible_hash:
         log.info("Change isn't visible on screen, skipping display refresh.")
