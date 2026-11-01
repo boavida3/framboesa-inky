@@ -9,6 +9,11 @@ cp .env.example .env   # add your secret iCal URLs, calendar names and DISPLAY_T
 python3 events_display.py --once
 ```
 
+For Korean, Chinese or Japanese titles and for emoji, install these fonts:
+```bash
+sudo apt install -y fonts-noto-cjk fonts-noto-color-emoji
+```
+
 ### Add your calendars
 For each calendar, find its private iCal (`.ics`) address in your calendar app's settings. Don't use a public address or an embed link.
 

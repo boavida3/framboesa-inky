@@ -2,5 +2,6 @@ requests
 recurring-ical-events
 icalendar
 pillow
+font-hanken-grotesk
 tzdata
 inky[rpi]
