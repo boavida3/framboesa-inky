@@ -65,6 +65,13 @@ except zoneinfo.ZoneInfoNotFoundError:
     log.error("Timezone %r not found. Install tzdata: pip3 install tzdata", _tz_name)
     LOCAL_TZ = None
 
+_rotation = os.environ.get("DISPLAY_ROTATION", "0")
+if _rotation not in ("0", "90", "180", "270"):
+    log.error("DISPLAY_ROTATION must be 0, 90, 180 or 270, not %r. Using 0.", _rotation)
+    _rotation = "0"
+# Degrees clockwise; 90 and 270 give a vertical layout
+DISPLAY_ROTATION = int(_rotation)
+
 
 # ---------------------------------------------------------------------------
 # Event fetching
@@ -183,13 +190,19 @@ def compute_events_hash(events):
     return hashlib.md5(str(key).encode()).hexdigest()
 
 
+def _layout_size(width, height):
+    """Return the (width, height) to draw at, given the panel's size and DISPLAY_ROTATION."""
+    return (height, width) if DISPLAY_ROTATION in (90, 270) else (width, height)
+
+
 def compute_visible_hash(events):
     """Return a digest of what the screen would show, ignoring the current date and time.
 
     Events too far down the list to fit on screen don't affect it.
     """
     colors = {"WHITE": 0, "BLACK": 1, "RED": 2, "BLUE": 3, "GREEN": 4, "YELLOW": 5}
-    img = render_events_image(events, VISIBLE_WIDTH, VISIBLE_HEIGHT, colors, now=datetime.datetime(2000, 1, 1))
+    width, height = _layout_size(VISIBLE_WIDTH, VISIBLE_HEIGHT)
+    img = render_events_image(events, width, height, colors, now=datetime.datetime(2000, 1, 1))
     return hashlib.md5(img.tobytes()).hexdigest()
 
 
@@ -219,13 +232,13 @@ def _has_meaningful_change(prev_fingerprints, events):
 
 
 def load_state():
-    """Return (hash_str, visible_hash, prev_fingerprints) from the state file, or (None, None, []) if unavailable."""
+    """Return (hash_str, visible_hash, prev_fingerprints, rotation) from the state file, or (None, None, [], 0) if unavailable."""
     try:
         with open(_STATE_FILE) as f:
             data = json.load(f)
-        return data.get("hash"), data.get("visible_hash"), data.get("events", [])
+        return data.get("hash"), data.get("visible_hash"), data.get("events", []), data.get("rotation", 0)
     except Exception:
-        return None, None, []
+        return None, None, [], 0
 
 
 def save_state(hash_str, visible_hash, events):
@@ -235,6 +248,7 @@ def save_state(hash_str, visible_hash, events):
         json.dump({
             "hash": hash_str,
             "visible_hash": visible_hash,
+            "rotation": DISPLAY_ROTATION,
             "updated_at": datetime.datetime.now().isoformat(),
             "events": fingerprints,
         }, f)
@@ -327,7 +341,7 @@ def render_events_image(events, width, height, colors, now=None):
     draw = ImageDraw.Draw(img)
 
     # Scale fonts and spacing based on display width
-    scale = width / 800.0
+    scale = max(width, height) / 800.0
     title_size = max(14, int(26 * scale))
     event_size = max(10, int(32 * scale))
     detail_size = max(9, int(24 * scale))
@@ -482,7 +496,9 @@ def _init_display():
 def update_display(events):
     """Render events and push to hardware (or save preview PNG if no hardware)."""
     inky_display, colors, w, h = _init_display()
-    img = render_events_image(events, w, h, colors)
+    img = render_events_image(events, *_layout_size(w, h), colors)
+    if DISPLAY_ROTATION:
+        img = img.rotate(-DISPLAY_ROTATION, expand=True)
 
     if inky_display:
         inky_display.set_image(img)
@@ -510,12 +526,16 @@ def update_display(events):
 def refresh_if_changed(events):
     """Redraw the display only if the events on screen changed, and persist the new state."""
     new_hash = compute_events_hash(events)
-    old_hash, old_visible_hash, prev_fingerprints = load_state()
-    if new_hash == old_hash:
+    old_hash, old_visible_hash, prev_fingerprints, old_rotation = load_state()
+    rotation_changed = DISPLAY_ROTATION != old_rotation
+    if new_hash == old_hash and not rotation_changed:
         log.debug("No change, skipping display update.")
         return
     new_visible_hash = compute_visible_hash(events)
-    if new_visible_hash == old_visible_hash:
+    if rotation_changed:
+        log.info("Rotation changed, updating display.")
+        update_display(events)
+    elif new_visible_hash == old_visible_hash:
         log.info("Change isn't visible on screen, skipping display refresh.")
     elif _has_meaningful_change(prev_fingerprints, events):
         log.info("Events changed, updating display.")

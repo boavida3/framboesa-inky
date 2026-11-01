@@ -1,4 +1,4 @@
-# AGENT.md
+# AGENTS.md
 
 Guidance for working with code in this repository.
 
@@ -59,7 +59,7 @@ Single-file script (`events_display.py`) with this data flow:
 | `save_state(hash, events)` | Persists hash + fingerprints `{sort_key, name, date}` to `.events_state.json` |
 | `load_state()` | Returns `(hash_str, prev_fingerprints)` tuple from `.events_state.json` |
 | `sanitize_text()` | Normalizes Unicode (dashes, smart quotes, spaces) to ASCII |
-| `render_events_image()` | Full layout: header, events loop, footer; all sizes scale from `width / 800.0` |
+| `render_events_image()` | Full layout: header, events loop, footer; all sizes scale from `max(width, height) / 800.0` |
 | `getsize(font, text)` | Wrapper around `font.getbbox(anchor="lt")` — returns `(ink_width, ink_height)`; `anchor="lt"` ensures `top=0` so heights are exact visible ink heights, preventing overlap in layout math |
 | `truncate(text, font, max_width)` | Ellipsis truncation to fit display width |
 
@@ -70,6 +70,7 @@ GCAL_ICAL_URL_1=https://example.com/private-.../calendar.ics
 GCAL_ICAL_URL_2=...               # optional second calendar
 GCAL_NAME_1=Me                    # optional label shown per calendar (GCAL_NAME_2, ...)
 DISPLAY_TZ=America/Los_Angeles    # timezone for all display times
+DISPLAY_ROTATION=0                # degrees clockwise: 0/180 horizontal, 90/270 vertical
 ```
 
 - `DISPLAY_TZ` is read into `LOCAL_TZ = zoneinfo.ZoneInfo(DISPLAY_TZ)` (Python 3.9+ stdlib). All event times and the footer "Updated:" timestamp use `LOCAL_TZ`. Required because the Pi runs UTC — without this, `.astimezone()` with no arg returns UTC.
@@ -86,6 +87,6 @@ Calendar list-view style:
 - **Events**: meta row in RED (`Tue Mar 3  ·  12:00 PM  ·  Venue`, detail font) above event title in BLACK (event font). Gap between events.
 - **Footer**: thin separator, right-aligned "Updated: Feb 25, 9:10 PM" in BLACK (detail font).
 
-Font sizes scale proportionally: `scale = width / 800.0`
+Font sizes scale proportionally: `scale = max(width, height) / 800.0`
 - Title font: 42pt × scale; event font: 32pt × scale; detail font: 26pt × scale
 - Preferred font: HankenGroteskBold/Medium → DejaVuSans → PIL default
