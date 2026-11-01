@@ -30,10 +30,10 @@ Calendars 1, 2 and 3 are shown in blue, red and green; further calendars repeat 
 ### Rotate the display
 Set `DISPLAY_ROTATION` in `.env` to `90` or `270` for vertical, or `0` or `180` for horizontal. The display redraws on the next run.
 
-Run it from cron; it only refreshes the display when events change:
+Run it from cron; it only refreshes the display when what's on screen changes:
 ```
-* * * * * /path/to/python3 /path/to/events_display.py --once >> /path/to/events_display.log 2>&1
+* * * * * flock -n /tmp/events_display.lock /path/to/python3 /path/to/events_display.py --once >> /path/to/events_display.log 2>&1
 ```
-A systemd unit (`events-display.service`) is included as an alternative to cron; use one, not both.
+If a calendar can't be fetched for over an hour, the display shows the calendars that still work and a red "Not updated since" warning.
 
 See `AGENTS.md` for architecture details. Built on [Pimoroni's inky library](https://github.com/pimoroni/inky) (MIT).

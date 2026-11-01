@@ -4,89 +4,50 @@ Guidance for working with code in this repository.
 
 ## Purpose
 
-E-ink display dashboard for a Raspberry Pi + Pimoroni Inky display. Fetches upcoming events from private iCal feeds, renders them onto a PIL image, and pushes to the hardware display. Falls back to saving a PNG preview when no hardware is detected.
-
-## Development Environment
-
-- `~/pi-remote/` is an **SSHFS mount of the Pi's home directory** (`/home/pi/`) — edits here go directly to the Pi
-- Pi SSH: `ssh <pi-ip>` (user `pi`)
-- The Pi runs **UTC system timezone**; `datetime.now()` returns UTC on the Pi
-- Scripts run on the Pi, not the Mac; `inky.auto` is not importable on macOS (no I2C hardware)
-- Python on Pi: `/path/to/venv/bin/python3` (Python 3.13)
-- Display hardware: **Pimoroni Spectra 6 7.3" (800×480, E673)**
+Calendar display for a Raspberry Pi Zero 2 W with a Pimoroni Inky Impression 7.3" (Spectra 6, 800x480, E673). It fetches private iCal feeds, renders an agenda onto a palette image and pushes it to the panel. Without display hardware it saves `events_preview.png` instead.
 
 ## Running
 
+Run on the Pi from the repo root, using its virtual environment:
+
 ```bash
-# Install dependencies (run on the Pi — Linux, not macOS)
-pip3 install requests icalendar pillow font-hanken-grotesk tzdata
-
-# Run manually on the Pi (fetches, renders, updates display, then exits)
-/path/to/venv/bin/python3 /home/pi/events_display.py --once
-
-# Run as daemon (polls every 60s, only refreshes display on actual changes)
-python3 events_display.py
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python events_display.py --once   # check once and exit
+.venv/bin/python events_display.py          # or poll every 60 seconds
 ```
 
-### Scheduling
+Deployed with cron, running `--once` every minute under `flock` so two runs can't draw at the same time:
 
-Currently deployed via **cron** (not systemd):
 ```
-* * * * * /path/to/venv/bin/python3 /home/pi/events_display.py --once >> /home/pi/events_display.log 2>&1
+* * * * * flock -n /tmp/events_display.lock /path/to/.venv/bin/python /path/to/events_display.py --once >> /path/to/events_display.log 2>&1
 ```
-Runs every minute. Uses `--once` to avoid stacking daemon processes.
 
-The `--once` path includes state-checking: it compares the fetched events against `.events_state.json` and only pushes to the e-ink display when new/changed events are detected (prevents flicker).
-
-A `events-display.service` systemd unit file exists but is **inactive** — use cron or enable it, not both.
+I2C and SPI must be enabled, with `dtoverlay=spi0-0cs` in `/boot/firmware/config.txt`. Korean titles and emoji need the `fonts-noto-cjk` and `fonts-noto-color-emoji` packages; without them, those characters don't display properly.
 
 ## Architecture
 
-Single-file script (`events_display.py`) with this data flow:
+Everything is in `events_display.py`.
 
-1. **Fetch** — `fetch_calendar_events()` reads one or more private iCal URLs (set via `GCAL_ICAL_URL_*` in `.env`), filters to events within the next 30 days, converts datetimes to local timezone, and returns up to 8 events sorted by start time.
-2. **Render** — `render_events_image(events, width, height, colors)` draws a clean calendar list-view layout (black header with date, red meta rows, black event titles, thin separators) onto a PIL `"P"` mode (palette) image using a fixed 3-color palette: WHITE=0, BLACK=1, RED=2.
-3. **Display** — `update_display()` tries `from inky.auto import auto` to detect hardware. On success, pushes the image to the display. On failure, saves `events_preview.png`.
-4. **Daemon** — `run_daemon()` polls every 60 seconds, computes an MD5 hash of the event list, and only re-renders when events change. State is persisted to `.events_state.json` (stores both hash and event fingerprints). Pure event expirations (no new/changed events) skip the display refresh to avoid flicker.
+1. **Fetch:** `fetch_calendar_events()` reads every `GCAL_ICAL_URL_*` feed, expands repeating events, keeps the next 90 days, hides events that have ended and removes duplicates across calendars.
+2. **Poll:** `poll()` handles failures. Within `FAILURE_GRACE` (1 hour) of a failed fetch the screen stays as it is. After that, it shows the calendars that still work, or the last known events, with a red "Not updated since" warning in the header.
+3. **Change detection:** `refresh_if_changed()` compares against `.events_state.json` and only redraws when the visible content, rotation, day or warning changes. Each redraw takes about 30 seconds and flashes the panel, so avoid needless ones.
+4. **Render:** `render_events_image()` draws the layout below on a `P` mode image using the panel's palette indices.
+5. **Display:** `update_display()` uses `inky.auto` to detect the panel, and applies `DISPLAY_ROTATION`.
 
-### Key functions
+## Layout
 
-| Function | Role |
-|---|---|
-| `fetch_calendar_events()` | Fetches iCal feeds, converts UTC→`LOCAL_TZ`, filters to next 30 days |
-| `fetch_all_events()` | Wrapper with error handling around `fetch_calendar_events()` |
-| `compute_events_hash()` | MD5 of sorted event list for change detection |
-| `save_state(hash, events)` | Persists hash + fingerprints `{sort_key, name, date}` to `.events_state.json` |
-| `load_state()` | Returns `(hash_str, prev_fingerprints)` tuple from `.events_state.json` |
-| `sanitize_text()` | Normalizes Unicode (dashes, smart quotes, spaces) to ASCII |
-| `render_events_image()` | Full layout: header, events loop, footer; all sizes scale from `max(width, height) / 800.0` |
-| `getsize(font, text)` | Wrapper around `font.getbbox(anchor="lt")` — returns `(ink_width, ink_height)`; `anchor="lt"` ensures `top=0` so heights are exact visible ink heights, preventing overlap in layout math |
-| `truncate(text, font, max_width)` | Ellipsis truncation to fit display width |
+- **Header:** month and year on the left; today's date, or the warning, on the right.
+- **Rows:** a colored bar for the calendar (blue, red, yellow), a bold title on the left, then the date and time in right-aligned columns. Dates within two days read Today or Tomorrow.
+- **Vertical displays:** the date and time move to a second line.
+- Titles are drawn by `_draw_title()`, which places emoji inline. A title containing non-Latin letters uses `FALLBACK_FONT` for the whole title.
 
-### Configuration (`.env`)
+## Configuration (`.env`)
 
 ```
-GCAL_ICAL_URL_1=https://example.com/private-.../calendar.ics
-GCAL_ICAL_URL_2=...               # optional second calendar
-GCAL_NAME_1=Me                    # optional label shown per calendar (GCAL_NAME_2, ...)
 DISPLAY_TZ=America/Los_Angeles    # timezone for all display times
 DISPLAY_ROTATION=0                # degrees clockwise: 0/180 horizontal, 90/270 vertical
+GCAL_ICAL_URL_1=https://example.com/private-.../calendar.ics
+GCAL_NAME_1=Me                    # label for this calendar (not currently displayed)
 ```
 
-- `DISPLAY_TZ` is read into `LOCAL_TZ = zoneinfo.ZoneInfo(DISPLAY_TZ)` (Python 3.9+ stdlib). All event times and the footer "Updated:" timestamp use `LOCAL_TZ`. Required because the Pi runs UTC — without this, `.astimezone()` with no arg returns UTC.
-- Get iCal URLs from your calendar app's settings. Use the private address.
-
-### Inky library (`inky/`)
-
-Vendored Pimoroni Inky v2.3.0. `inky.auto.auto()` reads the Pi's I2C EEPROM to identify the connected display and returns the correct driver. Supports pHAT (250×122), wHAT (400×300), Impressions 7.3" (800×480), Spectra variants, etc.
-
-## Layout (in `render_events_image`)
-
-Calendar list-view style:
-- **Header**: "My Calendar" in BLACK (title font, left-aligned), current date in BLACK (detail font, right-aligned), thin separator below. No background fill.
-- **Events**: meta row in RED (`Tue Mar 3  ·  12:00 PM  ·  Venue`, detail font) above event title in BLACK (event font). Gap between events.
-- **Footer**: thin separator, right-aligned "Updated: Feb 25, 9:10 PM" in BLACK (detail font).
-
-Font sizes scale proportionally: `scale = max(width, height) / 800.0`
-- Title font: 42pt × scale; event font: 32pt × scale; detail font: 26pt × scale
-- Preferred font: HankenGroteskBold/Medium → DejaVuSans → PIL default
+Add `_2`, `_3` and so on for more calendars. iCal addresses are secrets: never commit `.env`, and keep them out of logs.
