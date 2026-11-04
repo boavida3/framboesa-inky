@@ -18,7 +18,7 @@ cp .env.example .env   # add your secret iCal URLs, calendar names and DISPLAY_T
 python3 events_display.py --once
 ```
 
-For Korean, Chinese or Japanese titles and for emoji, install these fonts:
+English and Portuguese work out of the box. For Korean titles and emoji, install these fonts:
 ```bash
 sudo apt install -y fonts-noto-cjk fonts-noto-color-emoji
 ```
