@@ -70,13 +70,6 @@ except zoneinfo.ZoneInfoNotFoundError:
     log.error("Timezone %r not found. Install tzdata: pip3 install tzdata", _tz_name)
     LOCAL_TZ = None
 
-_rotation = os.environ.get("DISPLAY_ROTATION", "0")
-if _rotation not in ("0", "90", "180", "270"):
-    log.error("DISPLAY_ROTATION must be 0, 90, 180 or 270, not %r. Using 0.", _rotation)
-    _rotation = "0"
-# Degrees clockwise; 90 and 270 give a vertical layout
-DISPLAY_ROTATION = int(_rotation)
-
 
 # ---------------------------------------------------------------------------
 # Event fetching
@@ -199,11 +192,6 @@ def compute_events_hash(events):
     return hashlib.md5(str(key).encode()).hexdigest()
 
 
-def _layout_size(width, height):
-    """Return the (width, height) to draw at, given the panel's size and DISPLAY_ROTATION."""
-    return (height, width) if DISPLAY_ROTATION in (90, 270) else (width, height)
-
-
 def _today():
     """Return today's date in the display's timezone."""
     return (datetime.datetime.now(LOCAL_TZ) if LOCAL_TZ else datetime.datetime.now().astimezone()).date()
@@ -215,14 +203,13 @@ def compute_visible_hash(events):
     Events too far down the list to fit on screen don't affect it.
     """
     colors = {"WHITE": 0, "BLACK": 1, "RED": 2, "BLUE": 3, "GREEN": 4, "YELLOW": 5}
-    width, height = _layout_size(VISIBLE_WIDTH, VISIBLE_HEIGHT)
-    img = render_events_image(events, width, height, colors, now=datetime.datetime.combine(_today(), datetime.time()))
+    img = render_events_image(events, VISIBLE_WIDTH, VISIBLE_HEIGHT, colors, now=datetime.datetime.combine(_today(), datetime.time()))
     return hashlib.md5(img.tobytes()).hexdigest()
 
 
 def _layout_key(warning=None):
-    """Identify what needs a redraw when it changes: rotation, the date on screen and any warning."""
-    return f"{DISPLAY_ROTATION}|{_today().isoformat()}|{warning or ''}"
+    """Identify what needs a redraw when it changes: the date on screen and any warning."""
+    return f"{_today().isoformat()}|{warning or ''}"
 
 
 def _failing_since():
@@ -463,13 +450,10 @@ def render_events_image(events, width, height, colors, now=None, warning=None):
     draw.line((padding, header_height, width - padding, header_height), fill=BLACK, width=1)
 
     # --- Event list ---
-    # Title on the left, with date and time in right-aligned columns. On a vertical
-    # display one line is too narrow, so the date and time move to a second line.
+    # Title on the left, with date and time in right-aligned columns.
     list_top = header_height + int(4 * scale)
-    stacked = width < height
-    row_height = int((100 if stacked else 61) * scale)
+    row_height = int(61 * scale)
     title_baseline = int(44 * scale)
-    meta_baseline = int(84 * scale) if stacked else title_baseline
     right = width - padding
     text_x = padding + bar_indent
     column_gap = int(22 * scale)
@@ -477,7 +461,7 @@ def render_events_image(events, width, height, colors, now=None, warning=None):
     time_right = right
     date_right = time_right - getsize(meta_font, "10:00 AM")[0] - column_gap
     date_left = date_right - getsize(meta_font, "Wed Nov 30")[0]
-    title_width = (right if stacked else date_left - column_gap) - text_x
+    title_width = date_left - column_gap - text_x
 
     rows = (height - list_top) // row_height
 
@@ -495,8 +479,8 @@ def render_events_image(events, width, height, colors, now=None, warning=None):
         parts = ev["date"].split(", ", 1)
         days_away = (datetime.date.fromisoformat(ev["sort_key"][:10]) - now.date()).days
         date_label = {0: "Today", 1: "Tomorrow"}.get(days_away, parts[0])
-        draw.text((date_right, y + meta_baseline), date_label, fill=BLACK, font=meta_font, anchor="rs")
-        draw.text((time_right, y + meta_baseline), parts[1] if len(parts) > 1 else "All Day", fill=BLACK, font=meta_font, anchor="rs")
+        draw.text((date_right, y + title_baseline), date_label, fill=BLACK, font=meta_font, anchor="rs")
+        draw.text((time_right, y + title_baseline), parts[1] if len(parts) > 1 else "All Day", fill=BLACK, font=meta_font, anchor="rs")
 
         if i < rows - 1 and i < len(events) - 1:
             line_y = y + row_height - 1
@@ -532,9 +516,7 @@ def _init_display():
 def update_display(events, warning=None):
     """Render events and push to hardware (or save preview PNG if no hardware)."""
     inky_display, colors, w, h = _init_display()
-    img = render_events_image(events, *_layout_size(w, h), colors, warning=warning)
-    if DISPLAY_ROTATION:
-        img = img.rotate(-DISPLAY_ROTATION, expand=True)
+    img = render_events_image(events, w, h, colors, warning=warning)
 
     if inky_display:
         inky_display.set_image(img)
@@ -570,7 +552,7 @@ def refresh_if_changed(events, warning=None):
         return
     new_visible_hash = compute_visible_hash(events)
     if layout_changed:
-        log.info("Day, rotation or warning changed, updating display.")
+        log.info("Day or warning changed, updating display.")
         update_display(events, warning)
     elif new_visible_hash == old_visible_hash:
         log.info("Change isn't visible on screen, skipping display refresh.")

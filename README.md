@@ -29,9 +29,6 @@ GCAL_NAME_2=Partner
 ```
 Calendars 1, 2 and 3 are shown in blue, red and green; further calendars repeat those colors. Treat each secret address like a password: anyone who has it can read that calendar. Never commit `.env`.
 
-### Rotate the display
-Set `DISPLAY_ROTATION` in `.env` to `90` or `270` for vertical, or `0` or `180` for horizontal. The display redraws on the next run.
-
 Run it from cron; it only refreshes the display when what's on screen changes:
 ```
 * * * * * flock -n /tmp/events_display.lock /path/to/python3 /path/to/events_display.py --once >> /path/to/events_display.log 2>&1
