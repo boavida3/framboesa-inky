@@ -1,8 +1,15 @@
 # events-display
 
-![Framboesa e-ink calendar in a picture frame](images/display.jpg)
+<img src="images/display.jpg" alt="Framboesa e-ink calendar in a picture frame" width="49%"> <img src="images/back.jpg" alt="Raspberry Pi Zero 2 W on the back of the display" width="49%">
 
 Shows upcoming calendar events on a Pimoroni Inky Impression 7.3" (Spectra 6, 800x480) attached to a Raspberry Pi. Without display hardware it saves `events_preview.png` instead.
+
+## Hardware
+- Raspberry Pi Zero 2 W with a GPIO header (or the Zero 2 WH, which comes with one)
+- Pimoroni Inky Impression 7.3" e-ink display (Spectra 6, 800x480)
+- microSD card with Raspberry Pi OS
+- Micro USB power supply (5V, 2.5A)
+- Picture frame
 
 ## Setup (on the Pi)
 ```bash
