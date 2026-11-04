@@ -9,7 +9,7 @@ Shows upcoming calendar events on a Pimoroni Inky Impression 7.3" (Spectra 6, 80
 - Pimoroni Inky Impression 7.3" e-ink display (Spectra 6, 800x480)
 - microSD card with Raspberry Pi OS
 - Micro USB power supply (5V, 2.5A)
-- Picture frame
+- 5x7 inch picture frame
 
 ## Setup (on the Pi)
 ```bash
