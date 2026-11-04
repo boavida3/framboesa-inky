@@ -1,5 +1,7 @@
 # events-display
 
+![Framboesa e-ink calendar in a picture frame](images/display.jpg)
+
 Shows upcoming calendar events on a Pimoroni Inky Impression 7.3" (Spectra 6, 800x480) attached to a Raspberry Pi. Without display hardware it saves `events_preview.png` instead.
 
 ## Setup (on the Pi)
